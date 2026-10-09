@@ -8,4 +8,5 @@ frozenlist==1.8.0
 idna==3.20
 multidict==6.9.1
 propcache==0.5.4
+python-dotenv==1.2.4
 yarl==1.25.1
