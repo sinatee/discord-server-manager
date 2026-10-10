@@ -5,11 +5,8 @@ async def list_member(guild: discord.Guild) -> str:
     """list all member in server"""
     members_data = []
 
-
     for member in guild.members:
-
-        print(member.roles)
-        roles = [role.name for role in member.roles]
+        roles = [role.name for role in member.roles if role.name != "@everyone"]
 
         members_data.append({
             "id": member.id,
