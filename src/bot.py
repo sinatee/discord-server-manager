@@ -13,6 +13,8 @@ class Bot(discord.Client):
     def __init__(self):
         request_data = discord.Intents.default()
         request_data.message_content = True
+        request_data.members = True
+        request_data.guilds = True
         super().__init__(intents=request_data)
 
     # activate on succesfully connect to  discord server
