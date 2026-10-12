@@ -20,22 +20,41 @@ class Bot(discord.Client):
     # activate on succesfully connect to  discord server
     async def on_ready(self):
         print(f"[Bot] Logged in as: {self.user} (ID: {self.user.id})")
-        if ALLOWED_CHANNEL_ID:
-            print(f"[Bot] Listening strictly to channel ID: {ALLOWED_CHANNEL_ID}")
-        else:
-            print("[Bot] Warning: ALLOWED_CHANNEL_ID is not set!")
-        print("[Bot] Ready to receive messages.")
 
     # actvate when received message
     async def on_message(self, message: discord.Message):
+        # Ignore bot messages
         if message.author.bot:
             return
+
+         # Check if this bot is mentioned
+        if self.user not in message.mentions:
+            return
         
-        if ALLOWED_CHANNEL_ID and (message.channel.id != ALLOWED_CHANNEL_ID):
+        # Ignore DMs
+        if not message.guild:
+            return
+        
+        clean_message = (
+            message.content
+            .replace(f"<@{self.user.id}>", "")
+            .replace(f"<@!{self.user.id}>", "")
+            .strip()
+        )
+
+        #If the user tagged the bot with no message 
+        if not clean_message:
+            await message.reply("pen kuy rai?")
             return
 
-        print(f"[Received] From {message.author.name}: {message.content}")
-        await message.reply(f"{message.content}")
+        context_data = "\n".join([
+            "[Message Context]",
+            f"Server: {message.guild.name} (ID: {message.guild.id})",
+            f"Channel: {message.channel.name} (ID: {message.channel.id})",
+            f"User: {message.author.display_name} (ID: {message.author.id})",
+            f"User Message: {clean_message}",
+        ])
+        
 
 if __name__ == '__main__':
     if not DISCORD_TOKEN:
