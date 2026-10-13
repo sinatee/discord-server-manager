@@ -3,7 +3,7 @@ from dotenv import load_dotenv
 import discord
 
 from server_info.list_member import list_member
-from chanel_and_mesaage.send_message import send_message
+from channel_and_mesaage.send_message import send_message
 from member_and_role.create_role import create_role
 from server_info.list_role import list_roles
 from member_and_role.assign_role import assign_role
