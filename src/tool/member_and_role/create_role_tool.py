@@ -1,4 +1,4 @@
-from bot import bot
+from client_state import get_bot
 from calling_funciton.member_and_role.create_role import create_role
 
 async def create_role_tool(
@@ -17,7 +17,7 @@ async def create_role_tool(
         hoist: Whether to display members separately in the sidebar.
         preset: Permission preset name (e.g. admin, moderator, read_only, default).
     """
-    guild = bot.get_guild(int(guild_id))
+    guild = get_bot().get_guild(int(guild_id))
     if not guild:
         return "Error: Guild not found."
     return await create_role(guild, name, color_hex, hoist, preset)
