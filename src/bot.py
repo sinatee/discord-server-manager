@@ -54,10 +54,3 @@ class Bot(discord.Client):
             f"User: {message.author.display_name} (ID: {message.author.id})",
             f"User Message: {clean_message}",
         ])
-        
-
-if __name__ == '__main__':
-    if not DISCORD_TOKEN:
-        raise ValueError("Error: DISCORD_TOKEN is missing in .env")
-    bot = Bot()
-    bot.run(DISCORD_TOKEN)
