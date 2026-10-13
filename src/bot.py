@@ -54,3 +54,5 @@ class Bot(discord.Client):
             f"User: {message.author.display_name} (ID: {message.author.id})",
             f"User Message: {clean_message}",
         ])
+
+bot = Bot()
