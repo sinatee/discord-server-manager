@@ -1,12 +1,12 @@
-import os
-from dotenv import load_dotenv
 import discord
+# import os
+# from dotenv import load_dotenv
 
-load_dotenv()
+# load_dotenv()
 
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-ALLOWED_CHANNEL_ID = os.getenv("ALLOWED_CHANNEL_ID")
-ALLOWED_CHANNEL_ID = int(ALLOWED_CHANNEL_ID) if ALLOWED_CHANNEL_ID else None
+# DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+# ALLOWED_CHANNEL_ID = os.getenv("ALLOWED_CHANNEL_ID")
+# ALLOWED_CHANNEL_ID = int(ALLOWED_CHANNEL_ID) if ALLOWED_CHANNEL_ID else None
 
 class Bot(discord.Client):
 
