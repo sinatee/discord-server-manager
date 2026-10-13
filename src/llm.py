@@ -1,4 +1,5 @@
 import ollama
+from tool.get_roles import get_roles
 
 messages = [{"role": "user", "content": "Please check the roles in server ID 987654321."}]
 
