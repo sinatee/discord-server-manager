@@ -12,7 +12,11 @@ from tool.member_and_role.assign_role_tool import assign_role_tool
 from tool.member_and_role.unassign_role_tool import unassign_role_tool
 from tool.member_and_role.create_role_tool import create_role_tool
 from tool.member_and_role.delete_role_tool import delete_role_tool
-
+from tool.server_info.list_channel_tool import list_channel_tool
+from tool.channel_and_mesaage.create_text_channel_tool import create_text_channel_tool
+from tool.channel_and_mesaage.delete_text_channel_tool import delete_text_channel_tool
+from tool.channel_and_mesaage.create_voice_channel_tool import create_voice_channel_tool
+from tool.channel_and_mesaage.delete_voice_channel_tool import delete_voice_channel_tool
 
 TOOLS = [
     send_message_tool,
@@ -27,6 +31,11 @@ TOOLS = [
     unassign_role_tool,
     create_role_tool,
     delete_role_tool,
+    list_channel_tool,
+    create_text_channel_tool,
+    delete_text_channel_tool,
+    create_voice_channel_tool,
+    delete_voice_channel_tool
 ]
 AVAILABLE_TOOLS = {t.__name__: t for t in TOOLS}
 
