@@ -17,6 +17,8 @@ from tool.channel_and_mesaage.create_text_channel_tool import create_text_channe
 from tool.channel_and_mesaage.delete_text_channel_tool import delete_text_channel_tool
 from tool.channel_and_mesaage.create_voice_channel_tool import create_voice_channel_tool
 from tool.channel_and_mesaage.delete_voice_channel_tool import delete_voice_channel_tool
+from tool.server_info.get_message_history_tool import get_message_history_tool
+
 
 TOOLS = [
     send_message_tool,
@@ -35,7 +37,8 @@ TOOLS = [
     create_text_channel_tool,
     delete_text_channel_tool,
     create_voice_channel_tool,
-    delete_voice_channel_tool
+    delete_voice_channel_tool,
+    get_message_history_tool,
 ]
 AVAILABLE_TOOLS = {t.__name__: t for t in TOOLS}
 
