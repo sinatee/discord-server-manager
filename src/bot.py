@@ -56,13 +56,13 @@ class Bot(discord.Client):
             f"Channel: {message.channel.name} (ID: {message.channel.id})",
             f"User: {message.author.display_name} (ID: {message.author.id})",
             f"User Message: {clean_message}",
+            f"(Reply to the user ONLY by calling send_message_tool with channel_id {message.channel.id}. Plain text is never shown.)",
         ])
 
         try:
             async with message.channel.typing():
-                answer = await run_agent(context_data)
+                await run_agent(context_data)
         except Exception as e:
             print(f"[Bot] LLM error: {e}")
             await message.reply("Something went wrong talking to the model.")
-            return
 

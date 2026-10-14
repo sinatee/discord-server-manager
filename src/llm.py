@@ -57,19 +57,36 @@ async def execute_tool(tool_name: str, arguments: dict) -> str:
         return f"Error executing tool {tool_name}: {str(e)}"
 
 
-SYSTEM_PROMPT = """You manage a Discord server by calling tools.
-- Use tools to look up information or make changes.
-- Never invent IDs. Copy them from the message context.
-- When you are done, reply with a short plain-text summary of what you did or found."""
+SYSTEM_PROMPT = """You are a Discord server manager bot.
+Users only see messages sent with send_message_tool. Plain text is never shown.
 
-LOOP_LIMIT = 7
+Rules:
+1. Never guess or invent IDs. Use the Server and Channel IDs from the message context.
+   For any other ID, call the matching list tool first (get_message_history_tool for
+   messages, list_category_tool, list_channel_tool, list_roles_tool, list_member_tool)
+   and copy the ID from its result.
+2. Read every tool result. If it starts with "Error", the action failed. Do not say it worked.
+3. When finished, call send_message_tool once. content is YOUR report of what you did
+   or found, in your own words. Never repeat the user's message.
+4. If no tool can do the request, call send_message_tool and say what you cannot do.
+
+Examples:
+"what roles exist?" -> list_roles_tool -> send_message_tool(content="Roles: Admin, VIP, everyone.")
+"delete the last message" -> get_message_history_tool -> delete_message_tool(message_id copied from the result) -> send_message_tool(content="Deleted 1 message.")
+"draw a picture" -> send_message_tool(content="Sorry, I have no tool for that.")
+"""
+
+LOOP_LIMIT = 15
 client = ollama.AsyncClient()
 
-async def run_agent(user_text: str) -> str:
+async def run_agent(user_text: str) -> None:
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_text},
     ]
+    sent = False
+    nudged = False
+
     for _ in range(LOOP_LIMIT):
         res = await client.chat(
             model="qwen2.5:1.5b",
@@ -79,20 +96,32 @@ async def run_agent(user_text: str) -> str:
             options={
                 "temperature": 0,
                 "num_ctx": 4096,
-                "num_predict": 300,
+                "num_predict": 600,
             },
         )
-
         if res.done_reason == "length":
-            return "Error: the reply was cut off. Try a shorter request."
-
+            raise RuntimeError("model reply was cut off")
         messages.append(res.message)
 
         if not res.message.tool_calls:
-            return res.message.content or "(no reply)"
+            if sent:
+                print(f"[agent done] {res.message.content}")
+                return
+            if not nudged:                       # one reminder, then give up
+                nudged = True
+                messages.append({
+                    "role": "user",
+                    "content": "The user cannot see your text. Call send_message_tool now "
+                               "with the Channel ID from the context and your answer.",
+                })
+                continue
+            raise RuntimeError("model never sent a message")
 
         for call in res.message.tool_calls:
-            result = await execute_tool(call.function.name, call.function.arguments)
-            messages.append({"role": "tool", "tool_name": call.function.name, "content": str(result)})
+            name = call.function.name
+            result = await execute_tool(name, call.function.arguments)
+            if name == "send_message_tool" and not str(result).startswith("Error"):
+                sent = True
+            messages.append({"role": "tool", "tool_name": name, "content": str(result)})
 
-    return "Stopped: too many steps."
+    raise RuntimeError("too many steps")
