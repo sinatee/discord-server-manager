@@ -29,25 +29,39 @@ class Bot(discord.Client):
         # Ignore bot messages
         if message.author.bot:
             return
-
-         # Check if this bot is mentioned
-        if self.user not in message.mentions:
-            return
         
         # Ignore DMs
         if not message.guild:
             return
-        
-        clean_message = (
-            message.content
-            .replace(f"<@{self.user.id}>", "")
-            .replace(f"<@!{self.user.id}>", "")
-            .strip()
+
+        bot_id_str = str(self.user.id)
+        raw_content = message.content
+
+         # Check if this bot is mentioned
+        is_mentioned = (
+            self.user in message.mentions
+            or f"<@{bot_id_str}>" in raw_content
+            or f"<@!{bot_id_str}>" in raw_content
+            or "@server-manager" in raw_content.lower()
+            or (message.guild and any(role.name.lower() == "server-manager" for role in message.role_mentions))
         )
+
+        if not is_mentioned:
+            return
+        
+        
+        import re
+        clean_message = re.sub(r"<@&?\d+>", "", raw_content) # removes <@ID> and <@&ID>
+        clean_message = re.sub(r"@server-manager", "", clean_message, flags=re.IGNORECASE)
+        clean_message = clean_message.strip()
+
+
+        print(f"[DEBUG RAW]: {repr(message.content)}")
+        print(f"[DEBUG CLEAN]: {repr(clean_message)}")
 
         #If the user tagged the bot with no message 
         if not clean_message:
-            await message.reply("pen kuy rai?")
+            await message.reply("arai?")
             return
 
         context_data = "\n".join([
@@ -56,7 +70,8 @@ class Bot(discord.Client):
             f"Channel: {message.channel.name} (ID: {message.channel.id})",
             f"User: {message.author.display_name} (ID: {message.author.id})",
             f"User Message: {clean_message}",
-            f"(Reply to the user ONLY by calling send_message_tool with channel_id {message.channel.id}. Plain text is never shown.)",
+            "",
+            f"REMINDER: You must reply by calling send_message_tool(channel_id='{message.channel.id}', content=...).",
         ])
 
         try:

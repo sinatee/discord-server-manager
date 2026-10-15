@@ -56,27 +56,17 @@ async def execute_tool(tool_name: str, arguments: dict) -> str:
     except Exception as e:
         return f"Error executing tool {tool_name}: {str(e)}"
 
+SYSTEM_PROMPT = """You are a Discord server management bot. 
 
-SYSTEM_PROMPT = """You are a Discord server manager bot.
-Users only see messages sent with send_message_tool. Plain text is never shown.
-
-Rules:
-1. Never guess or invent IDs. Use the Server and Channel IDs from the message context.
-   For any other ID, call the matching list tool first (get_message_history_tool for
-   messages, list_category_tool, list_channel_tool, list_roles_tool, list_member_tool)
-   and copy the ID from its result.
-2. Read every tool result. If it starts with "Error", the action failed. Do not say it worked.
-3. When finished, call send_message_tool once. content is YOUR report of what you did
-   or found, in your own words. Never repeat the user's message.
-4. If no tool can do the request, call send_message_tool and say what you cannot do.
-
-Examples:
-"what roles exist?" -> list_roles_tool -> send_message_tool(content="Roles: Admin, VIP, everyone.")
-"delete the last message" -> get_message_history_tool -> delete_message_tool(message_id copied from the result) -> send_message_tool(content="Deleted 1 message.")
-"draw a picture" -> send_message_tool(content="Sorry, I have no tool for that.")
+CORE DIRECTIVES:
+1. TOOL FIRST: When a user asks you to create, delete, or modify something, you MUST call the matching tool first (e.g. `create_text_channel_tool`). Never reply with text saying you did it without calling the tool.
+2. FINISH WITH MESSAGE: After the tool runs, you must call `send_message_tool` to tell the user the result.
+3. EXTRACT ID: Always extract `guild_id` from the context for action tools, and `channel_id` for `send_message_tool`.
+4. NO PLACEHOLDERS: Never pass dummy or optional IDs (like `category_id`) unless explicitly provided by the user. Leave optional parameters out.
+5. CLEAN LISTS: When showing lists of items, show only their names in bullet points.
 """
 
-LOOP_LIMIT = 15
+LOOP_LIMIT = 10
 client = ollama.AsyncClient()
 
 async def run_agent(user_text: str) -> None:
@@ -95,33 +85,43 @@ async def run_agent(user_text: str) -> None:
             keep_alive="10m",
             options={
                 "temperature": 0,
-                "num_ctx": 4096,
-                "num_predict": 600,
+                "num_ctx": 8192,
+                "num_predict": 1500,
             },
         )
         if res.done_reason == "length":
-            raise RuntimeError("model reply was cut off")
+            raise RuntimeError("Model reply was cut off (token limit reached).")
+        
         messages.append(res.message)
 
         if not res.message.tool_calls:
             if sent:
                 print(f"[agent done] {res.message.content}")
                 return
-            if not nudged:                       # one reminder, then give up
+            
+            if not nudged:
                 nudged = True
                 messages.append({
                     "role": "user",
-                    "content": "The user cannot see your text. Call send_message_tool now "
-                               "with the Channel ID from the context and your answer.",
+                    "content": "REMINDER: You must call `send_message_tool` to reply. The user cannot see plain text. Call `send_message_tool` now.",
                 })
                 continue
+
             raise RuntimeError("model never sent a message")
 
         for call in res.message.tool_calls:
             name = call.function.name
-            result = await execute_tool(name, call.function.arguments)
+            args = call.function.arguments or {}
+            
+            result = await execute_tool(name, args)
+            
             if name == "send_message_tool" and not str(result).startswith("Error"):
                 sent = True
-            messages.append({"role": "tool", "tool_name": name, "content": str(result)})
 
-    raise RuntimeError("too many steps")
+            # Standard tool role structure for Ollama API
+            messages.append({
+                "role": "tool",
+                "content": str(result),
+            })
+
+    raise RuntimeError("Agent reached maximum execution step limit without finishing.")
