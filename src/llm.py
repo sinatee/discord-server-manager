@@ -1,4 +1,5 @@
 import inspect
+import json
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 
@@ -390,12 +391,25 @@ MUTATING_TOOLS = {
 }
 client = ollama.AsyncClient()
 
+
+def is_delete_all_messages_request(user_text: str) -> bool:
+    """Identify explicit requests to delete every recent message in the current channel."""
+    normalized_text = user_text.lower()
+    return any(phrase in normalized_text for phrase in (
+        "ลบทุกข้อความ",
+        "ลบข้อความทั้งหมด",
+        "delete all messages",
+        "delete every message",
+    ))
+
+
 async def run_agent(user_text: str) -> str | None:
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_text},
     ]
     nudged = False
+    delete_all_messages = is_delete_all_messages_request(user_text)
 
     for _ in range(LOOP_LIMIT):
         res = await client.chat(
@@ -435,6 +449,32 @@ async def run_agent(user_text: str) -> str | None:
             args = call.function.arguments or {}
             
             result = await execute_tool(name, args)
+
+            if name == "get_message_history_tool" and delete_all_messages:
+                try:
+                    history = json.loads(result)
+                except json.JSONDecodeError:
+                    action_results.append("Error: Unable to read message history.")
+                    continue
+
+                if not isinstance(history, list):
+                    action_results.append(str(result))
+                    continue
+
+                for message in history:
+                    message_id = message.get("message_id")
+                    if not message_id:
+                        continue
+
+                    deletion_result = await execute_tool("delete_message_tool", {
+                        "channel_id": args["channel_id"],
+                        "message_id": message_id,
+                    })
+                    if str(deletion_result).startswith("Confirmation required."):
+                        confirmation_requested = True
+                    else:
+                        action_results.append(str(deletion_result))
+                continue
 
             if str(result).startswith("Confirmation required."):
                 confirmation_requested = True
