@@ -79,8 +79,6 @@ class Bot(discord.Client):
             f"Channel: {message.channel.name} (ID: {message.channel.id})",
             f"User: {message.author.display_name} (ID: {message.author.id})",
             f"User Message: {clean_message}",
-            "",
-            f"REMINDER: You must reply by calling send_message_tool(channel_id='{message.channel.id}', content=...).",
         ])
 
         try:

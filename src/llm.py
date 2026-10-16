@@ -2,8 +2,10 @@ import inspect
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 
+import discord
 import ollama
 
+from client_state import get_bot
 from tool.channel_and_mesaage.send_message_tool import send_message_tool
 from tool.channel_and_mesaage.delete_message_tool import delete_message_tool
 from tool.server_info.list_category_tool import list_category_tool
@@ -77,7 +79,11 @@ request_context = ContextVar("request_context", default=None)
 pending_deletions = {}
 
 
-def set_request_context(guild_id: int, user_id: int, channel_id: int):
+def set_request_context(
+    guild_id: int,
+    user_id: int,
+    channel_id: int,
+):
     """Store the Discord request identity for the current agent execution."""
     return request_context.set((guild_id, user_id, channel_id))
 
@@ -98,9 +104,48 @@ async def confirm_pending_deletion(guild_id: int, user_id: int, channel_id: int)
         return "The deletion confirmation expired. Please make the request again."
 
     results = []
-    for tool_name, arguments in deletions:
+    for tool_name, arguments, _preview in deletions:
         results.append(await execute_tool(tool_name, arguments, confirmed=True))
     return "\n".join(results)
+
+
+def get_deletion_preview(tool_name: str, arguments: dict) -> str:
+    """Return a human-readable target preview without mutating Discord state."""
+    bot = get_bot()
+    if bot is None:
+        return "Error: Bot not initialized."
+
+    guild = bot.get_guild(int(arguments["guild_id"]))
+    if guild is None:
+        return "Error: Guild not found."
+
+    if tool_name in {"delete_text_channel_tool", "delete_voice_channel_tool"}:
+        channel = guild.get_channel(int(arguments["channel_id"]))
+        expected_type = discord.TextChannel if tool_name == "delete_text_channel_tool" else discord.VoiceChannel
+        if not isinstance(channel, expected_type):
+            return "Error: Requested channel type was not found in this server."
+        channel_type = "Text" if tool_name == "delete_text_channel_tool" else "Voice"
+        return f"- {channel_type} channel: #{channel.name} (ID: {channel.id})"
+
+    if tool_name == "delete_category_tool":
+        category = guild.get_channel(int(arguments["category_id"]))
+        if not isinstance(category, discord.CategoryChannel):
+            return "Error: Category not found in this server."
+        return f"- Category: {category.name} (ID: {category.id})"
+
+    if tool_name == "delete_role_tool":
+        role = guild.get_role(int(arguments["role_id"]))
+        if role is None:
+            return "Error: Role not found in this server."
+        return f"- Role: {role.name} (ID: {role.id})"
+
+    if tool_name == "delete_message_tool":
+        channel = guild.get_channel(int(arguments["channel_id"]))
+        if not isinstance(channel, discord.TextChannel):
+            return "Error: Text channel not found in this server."
+        return f"- Message ID: {arguments['message_id']} in #{channel.name}"
+
+    return "Error: Unsupported delete tool."
 
 async def execute_tool(tool_name: str, arguments: dict, *, confirmed: bool = False) -> str:
     """Dynamically execute a tool function by name with given arguments."""
@@ -165,13 +210,19 @@ async def execute_tool(tool_name: str, arguments: dict, *, confirmed: bool = Fal
         if context is None:
             return "Error: Delete commands require a Discord request context."
 
-        pending = pending_deletions.get(context)
+        guild_id, user_id, source_channel_id = context
+        preview = get_deletion_preview(tool_name, arguments)
+        if preview.startswith("Error:"):
+            return preview
+
+        key = (guild_id, user_id, source_channel_id)
+        pending = pending_deletions.get(key)
         if pending is None or datetime.now(timezone.utc) > pending[1]:
             pending = ([], datetime.now(timezone.utc) + CONFIRMATION_TIMEOUT)
-            pending_deletions[context] = pending
+            pending_deletions[key] = pending
 
         deletions, _expires_at = pending
-        deletion = (tool_name, arguments)
+        deletion = (tool_name, arguments, preview)
         if deletion not in deletions:
             deletions.append(deletion)
         return "Confirmation required."
@@ -246,14 +297,10 @@ CHANNEL CREATION
 - Never create a channel outside the requested category when the user explicitly requested one.
 
 CHANNEL DELETION
-- Delete actions require a channel_id.
-- If the user gives a channel ID, use it with the matching delete tool.
-- If the user gives only a channel name:
-  1. Call list_channel_tool.
-  2. Find an exact matching channel name and type.
-  3. If exactly one match exists, delete it with the matching delete tool.
-  4. If no match exists, report that it was not found.
-  5. If multiple matches exist, ask the user to provide the channel ID.
+- If the user gives only a channel name, call list_channel_tool and find an exact name and type match.
+- Never delete immediately. The application displays the resolved channel names and IDs first,
+  then waits for the user's confirmation.
+- If no channel or multiple channels match, ask the user to clarify instead of deleting anything.
 - Do not delete a text channel when the user requested a voice channel, or vice versa.
 - Deletion requests are collected into one confirmation batch. Tell the user to confirm only
   after every requested deletion tool has been selected.
@@ -378,10 +425,12 @@ async def run_agent(user_text: str) -> str | None:
 
         if confirmation_requested:
             context = request_context.get()
-            deletion_count = len(pending_deletions[context][0]) if context else 0
+            pending_key = context if context else None
+            deletions = pending_deletions[pending_key][0] if pending_key else []
             summary = "\n".join(action_results)
             confirmation = (
-                f"Confirmation required for {deletion_count} deletion(s). "
+                "The following will be deleted:\n"
+                f"{'\n'.join(deletion[2] for deletion in deletions)}\n"
                 "Reply `confirm` or `ยืนยัน` within 5 minutes to continue."
             )
             return f"{summary}\n{confirmation}".strip()
