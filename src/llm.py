@@ -1,3 +1,5 @@
+import inspect
+
 import ollama
 
 from tool.channel_and_mesaage.send_message_tool import send_message_tool
@@ -41,16 +43,85 @@ TOOLS = [
     get_message_history_tool,
 ]
 AVAILABLE_TOOLS = {t.__name__: t for t in TOOLS}
+TOOL_ARGUMENT_CONTRACTS = {
+    "send_message_tool": {"channel_id", "content"},
+    "delete_message_tool": {"channel_id", "message_id"},
+    "get_message_history_tool": {"guild_id", "channel_id", "limit"},
+    "list_category_tool": {"guild_id"},
+    "create_category_tool": {"guild_id", "name"},
+    "delete_category_tool": {"guild_id", "category_id"},
+    "move_category_tool": {"guild_id", "category_id", "position"},
+    "list_channel_tool": {"guild_id"},
+    "create_text_channel_tool": {"guild_id", "name", "category_id"},
+    "delete_text_channel_tool": {"guild_id", "channel_id"},
+    "create_voice_channel_tool": {"guild_id", "name", "category_id"},
+    "delete_voice_channel_tool": {"guild_id", "channel_id"},
+    "list_member_tool": {"guild_id"},
+    "list_roles_tool": {"guild_id"},
+    "create_role_tool": {"guild_id", "name", "color_hex", "hoist", "preset"},
+    "assign_role_tool": {"guild_id", "user_id", "role_id"},
+    "unassign_role_tool": {"guild_id", "user_id", "role_id"},
+    "delete_role_tool": {"guild_id", "role_id"},
+}
 
 async def execute_tool(tool_name: str, arguments: dict) -> str:
     """Dynamically execute a tool function by name with given arguments."""
 
-    print(f"[tool call] {tool_name} {dict(arguments)}")
+    arguments = dict(arguments or {})
+    print(f"[tool call] {tool_name} {arguments}")
 
     if tool_name not in AVAILABLE_TOOLS:
         return f"Error: Tool '{tool_name}' not found."
-    
+
+    contract_arguments = TOOL_ARGUMENT_CONTRACTS[tool_name]
+    unsupported_contract_arguments = set(arguments) - contract_arguments
+    if unsupported_contract_arguments:
+        print(
+            f"[tool contract] Ignoring unsupported arguments for {tool_name}: "
+            f"{sorted(unsupported_contract_arguments)}"
+        )
+        arguments = {
+            name: value for name, value in arguments.items()
+            if name in contract_arguments
+        }
+
     tool_func = AVAILABLE_TOOLS[tool_name]
+    parameters = inspect.signature(tool_func).parameters
+    accepted_arguments = {
+        name
+        for name, parameter in parameters.items()
+        if parameter.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        )
+    }
+    ignored_arguments = set(arguments) - accepted_arguments
+    if ignored_arguments:
+        print(
+            f"[tool validation] Ignoring unsupported arguments for {tool_name}: "
+            f"{sorted(ignored_arguments)}"
+        )
+        arguments = {
+            name: value for name, value in arguments.items()
+            if name in accepted_arguments
+        }
+
+    missing_arguments = [
+        name
+        for name, parameter in parameters.items()
+        if parameter.default is inspect.Parameter.empty
+        and parameter.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        )
+        and name not in arguments
+    ]
+    if missing_arguments:
+        return (
+            f"Error: Tool '{tool_name}' is missing required arguments: "
+            f"{', '.join(missing_arguments)}."
+        )
+
     try:
         return await tool_func(**arguments)
     except Exception as e:
@@ -90,6 +161,22 @@ TOOL SELECTION
 - Create, assign, unassign, or delete a role: use the matching role tool
 - Send a message: send_message_tool
 - Find a message ID before deleting a message: get_message_history_tool
+
+TOOL ARGUMENT CONTRACT
+- Follow the exact allowed arguments for each tool. Never copy an ID from the
+  context into another tool just because it is available.
+- create_text_channel_tool and create_voice_channel_tool: guild_id, name, optional category_id.
+- delete_text_channel_tool and delete_voice_channel_tool: guild_id, channel_id.
+- list_channel_tool and list_category_tool: guild_id only.
+- create_category_tool: guild_id, name. delete_category_tool: guild_id, category_id.
+- move_category_tool: guild_id, category_id, position.
+- send_message_tool: channel_id, content only. The context channel_id belongs to this tool.
+- delete_message_tool: channel_id, message_id. get_message_history_tool: guild_id, channel_id, optional limit.
+- list_member_tool and list_roles_tool: guild_id only.
+- create_role_tool: guild_id, name, optional color_hex, hoist, preset.
+- assign_role_tool and unassign_role_tool: guild_id, user_id, role_id.
+- delete_role_tool: guild_id, role_id.
+- Example: Never pass channel_id to create_text_channel_tool or create_voice_channel_tool.
 
 CHANNEL CREATION
 - If the user asks to create a text channel, call create_text_channel_tool.
