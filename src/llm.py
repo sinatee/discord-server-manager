@@ -303,14 +303,17 @@ client = ollama.AsyncClient()
 
 def is_delete_all_messages_request(user_text: str) -> bool:
     """Identify explicit requests to delete every recent message in the current channel."""
-    normalized_text = user_text.lower()
-    return bool(re.search(
+    normalized_text = get_user_command(user_text).lower()
+    english_request = bool(re.search(
         r"\b(?:delete|remove)\s+(?:all|every)\s+messages?\b",
         normalized_text,
-    )) or any(phrase in normalized_text for phrase in (
-        "ลบทุกข้อความ",
-        "ลบข้อความทั้งหมด",
     ))
+    thai_request = bool(re.search(
+        r"ลบ\s*(?:ทุก\s*)?ข้อความ\s*(?:ทั้งหมด|ทุก)?\s*(?:นี้)?"
+        r"\s*(?:ใน\s*)?(?:ช่อง|แชนแนล|channel)\s*(?:นี้)?",
+        normalized_text,
+    )) or "ลบทุกข้อความ" in normalized_text
+    return english_request or thai_request
 
 
 def get_user_command(user_text: str) -> str:
@@ -450,6 +453,48 @@ async def queue_mentioned_user_message_deletions(user_ids: set[str]) -> str:
     )
 
 
+async def queue_all_recent_message_deletions() -> str:
+    """Queue every recent message in the current channel from verified history."""
+    context = request_context.get()
+    if context is None:
+        return "Error: Delete commands require a Discord request context."
+
+    _guild_id, _user_id, channel_id = context
+    history = await get_current_channel_history()
+    if isinstance(history, str):
+        return history
+
+    message_ids = [
+        str(message["message_id"])
+        for message in history if message.get("message_id")
+    ]
+    if not message_ids:
+        return "There are no recent messages in this channel to delete."
+
+    queued = 0
+    errors = []
+    for message_id in message_ids:
+        result = await execute_tool("delete_message_tool", {
+            "channel_id": str(channel_id),
+            "message_id": message_id,
+        })
+        if str(result).startswith("Confirmation required."):
+            queued += 1
+        else:
+            errors.append(str(result))
+
+    if not queued:
+        return "\n".join(errors) or "No messages could be queued for deletion."
+
+    previews = pending_deletions[context][0]
+    preview_text = "\n".join(deletion[2] for deletion in previews)
+    error_text = f"\n{' '.join(errors)}" if errors else ""
+    return (
+        f"The following {queued} recent message(s) will be deleted:\n"
+        f"{preview_text}{error_text}\nReply `confirm` or `ยืนยัน` within 5 minutes to continue."
+    )
+
+
 async def run_agent(user_text: str) -> str | None:
     message_id = get_single_message_id_request(user_text)
     if message_id:
@@ -465,13 +510,17 @@ async def run_agent(user_text: str) -> str | None:
             pending_deletions.pop(context, None)
         return await queue_mentioned_user_message_deletions(get_mentioned_user_ids(user_text))
 
+    if is_delete_all_messages_request(user_text):
+        context = request_context.get()
+        if context is not None:
+            pending_deletions.pop(context, None)
+        return await queue_all_recent_message_deletions()
+
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_text},
     ]
     nudged = False
-    delete_all_messages = is_delete_all_messages_request(user_text)
-
     for _ in range(LOOP_LIMIT):
         res = await client.chat(
             model="qwen3:1.7b",
@@ -510,32 +559,6 @@ async def run_agent(user_text: str) -> str | None:
             args = call.function.arguments or {}
             
             result = await execute_tool(name, args)
-
-            if name == "get_message_history_tool" and delete_all_messages:
-                try:
-                    history = json.loads(result)
-                except json.JSONDecodeError:
-                    action_results.append("Error: Unable to read message history.")
-                    continue
-
-                if not isinstance(history, list):
-                    action_results.append(str(result))
-                    continue
-
-                for message in history:
-                    message_id = message.get("message_id")
-                    if not message_id:
-                        continue
-
-                    deletion_result = await execute_tool("delete_message_tool", {
-                        "channel_id": args["channel_id"],
-                        "message_id": message_id,
-                    })
-                    if str(deletion_result).startswith("Confirmation required."):
-                        confirmation_requested = True
-                    else:
-                        action_results.append(str(deletion_result))
-                continue
 
             if str(result).startswith("Confirmation required."):
                 confirmation_requested = True
