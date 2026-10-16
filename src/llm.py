@@ -291,6 +291,8 @@ async def run_agent(user_text: str) -> None:
             
             if name == "send_message_tool" and not str(result).startswith("Error"):
                 sent = True
+                print("[agent done] Reply sent.")
+                return
 
             # Standard tool role structure for Ollama API
             messages.append({
