@@ -253,7 +253,7 @@ async def run_agent(user_text: str) -> None:
 
     for _ in range(LOOP_LIMIT):
         res = await client.chat(
-            model="qwen2.5:1.5b",
+            model="qwen3:1.7b",
             messages=messages,
             tools=TOOLS,
             keep_alive="10m",
