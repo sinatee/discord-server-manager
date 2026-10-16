@@ -241,6 +241,7 @@ Flow:
 """
 
 LOOP_LIMIT = 10
+CHANNEL_DELETE_TOOLS = {"delete_text_channel_tool", "delete_voice_channel_tool"}
 client = ollama.AsyncClient()
 
 async def run_agent(user_text: str) -> None:
@@ -288,6 +289,13 @@ async def run_agent(user_text: str) -> None:
             args = call.function.arguments or {}
             
             result = await execute_tool(name, args)
+
+            if (
+                name in CHANNEL_DELETE_TOOLS
+                and not str(result).startswith("Error")
+            ):
+                print(f"[agent done] {name} completed.")
+                return
             
             if name == "send_message_tool" and not str(result).startswith("Error"):
                 sent = True
