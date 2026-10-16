@@ -63,6 +63,14 @@ class Bot(discord.Client):
         clean_message = re.sub(r"<@&?\d+>", "", raw_content) # removes <@ID> and <@&ID>
         clean_message = re.sub(r"@server-manager", "", clean_message, flags=re.IGNORECASE)
         clean_message = clean_message.strip()
+        mentioned_users = [
+            member for member in message.mentions
+            if member.id != self.user.id
+        ]
+        mentioned_users_context = ", ".join(
+            f"{member.display_name} (ID: {member.id})"
+            for member in mentioned_users
+        ) or "None"
 
 
         print(f"[DEBUG RAW]: {repr(message.content)}")
@@ -78,6 +86,7 @@ class Bot(discord.Client):
             f"Server: {message.guild.name} (ID: {message.guild.id})",
             f"Channel: {message.channel.name} (ID: {message.channel.id})",
             f"User: {message.author.display_name} (ID: {message.author.id})",
+            f"Mentioned users: {mentioned_users_context}",
             f"User Message: {clean_message}",
         ])
 

@@ -242,8 +242,9 @@ LANGUAGE
 
 CONTEXT
 - The message context contains the current guild_id and channel_id.
+- Mentioned users in the context include their Discord user IDs.
 - Always use the guild_id from the context for server actions.
-- Always use the channel_id from the context when calling send_message_tool.
+- Always use the current channel_id from the context for actions on "this channel".
 - Never invent, guess, or use placeholder IDs.
 
 RESPONSE RULE
@@ -304,6 +305,17 @@ CHANNEL DELETION
 - Do not delete a text channel when the user requested a voice channel, or vice versa.
 - Deletion requests are collected into one confirmation batch. Tell the user to confirm only
   after every requested deletion tool has been selected.
+
+MESSAGE DELETION
+- If the user asks to delete messages from a mentioned user in the current channel:
+  1. Use guild_id and channel_id from the context. Never ask the user to provide them.
+  2. Use the mentioned user's ID from the context. Never ask the user to provide it again.
+  3. Call get_message_history_tool(guild_id, channel_id, limit=50).
+  4. Select only messages whose author_id exactly matches the mentioned user's ID.
+  5. Call delete_message_tool(channel_id, message_id) for every selected message in one batch.
+  6. The application shows the matching messages before confirmation and deletes only after confirm.
+- If no user is mentioned, ask the user to mention the target user.
+- "All messages" means up to the 50 most recent messages because of the safety limit.
 
 MULTIPLE COMMANDS
 - When the user gives multiple independent commands in one message, call every matching action
