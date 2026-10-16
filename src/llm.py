@@ -77,6 +77,7 @@ DELETE_TOOLS = {
     "delete_role_tool",
 }
 CONFIRMATION_TIMEOUT = timedelta(minutes=5)
+DISCORD_MESSAGE_LIMIT = 2000
 request_context = ContextVar("request_context", default=None)
 pending_deletions = {}
 
@@ -92,6 +93,26 @@ def set_request_context(
 
 def reset_request_context(token) -> None:
     request_context.reset(token)
+
+
+def format_deletion_confirmation(heading: str, previews: list[str]) -> str:
+    """Keep a confirmation preview below Discord's 2,000-character limit."""
+    suffix = "\nReply `confirm` or `ยืนยัน` within 5 minutes to continue."
+    message = f"{heading}\n"
+    for index, preview in enumerate(previews):
+        # A channel/message name can be unusually long, so cap each preview too.
+        preview = preview[:300]
+        candidate = f"{message}{preview}\n"
+        if len(candidate) + len(suffix) <= DISCORD_MESSAGE_LIMIT:
+            message = candidate
+            continue
+
+        remaining = len(previews) - index
+        omitted = f"... and {remaining} more item(s) from verified history.\n"
+        if len(message) + len(omitted) + len(suffix) <= DISCORD_MESSAGE_LIMIT:
+            message += omitted
+        break
+    return f"{message.rstrip()}{suffix}"
 
 
 async def confirm_pending_deletion(guild_id: int, user_id: int, channel_id: int) -> str:
@@ -402,9 +423,8 @@ async def queue_single_message_deletion(message_id: str) -> str:
         return str(result)
 
     deletion = pending_deletions[context][0][-1]
-    return (
-        f"The following message will be deleted:\n{deletion[2]}\n"
-        "Reply `confirm` or `ยืนยัน` within 5 minutes to continue."
+    return format_deletion_confirmation(
+        "The following message will be deleted:", [deletion[2]],
     )
 
 
@@ -445,12 +465,11 @@ async def queue_mentioned_user_message_deletions(user_ids: set[str]) -> str:
         return "\n".join(errors) or "No messages could be queued for deletion."
 
     previews = pending_deletions[context][0]
-    preview_text = "\n".join(deletion[2] for deletion in previews)
-    error_text = f"\n{' '.join(errors)}" if errors else ""
-    return (
-        f"The following {queued} message(s) from the mentioned user will be deleted:\n"
-        f"{preview_text}{error_text}\nReply `confirm` or `ยืนยัน` within 5 minutes to continue."
+    confirmation = format_deletion_confirmation(
+        f"The following {queued} message(s) from the mentioned user will be deleted:",
+        [deletion[2] for deletion in previews],
     )
+    return f"{confirmation}\n{' '.join(errors)}" if errors else confirmation
 
 
 async def queue_all_recent_message_deletions() -> str:
@@ -487,12 +506,11 @@ async def queue_all_recent_message_deletions() -> str:
         return "\n".join(errors) or "No messages could be queued for deletion."
 
     previews = pending_deletions[context][0]
-    preview_text = "\n".join(deletion[2] for deletion in previews)
-    error_text = f"\n{' '.join(errors)}" if errors else ""
-    return (
-        f"The following {queued} recent message(s) will be deleted:\n"
-        f"{preview_text}{error_text}\nReply `confirm` or `ยืนยัน` within 5 minutes to continue."
+    confirmation = format_deletion_confirmation(
+        f"The following {queued} recent message(s) will be deleted:",
+        [deletion[2] for deletion in previews],
     )
+    return f"{confirmation}\n{' '.join(errors)}" if errors else confirmation
 
 
 async def run_agent(user_text: str) -> str | None:
@@ -579,10 +597,9 @@ async def run_agent(user_text: str) -> str | None:
             pending_key = context if context else None
             deletions = pending_deletions[pending_key][0] if pending_key else []
             summary = "\n".join(action_results)
-            confirmation = (
-                "The following will be deleted:\n"
-                f"{'\n'.join(deletion[2] for deletion in deletions)}\n"
-                "Reply `confirm` or `ยืนยัน` within 5 minutes to continue."
+            confirmation = format_deletion_confirmation(
+                "The following will be deleted:",
+                [deletion[2] for deletion in deletions],
             )
             return f"{summary}\n{confirmation}".strip()
 

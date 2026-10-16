@@ -10,6 +10,26 @@ from client_state import set_bot
 # ALLOWED_CHANNEL_ID = os.getenv("ALLOWED_CHANNEL_ID")
 # ALLOWED_CHANNEL_ID = int(ALLOWED_CHANNEL_ID) if ALLOWED_CHANNEL_ID else None
 
+
+async def reply_in_chunks(message: discord.Message, content: str) -> None:
+    """Reply without exceeding Discord's 2,000-character message limit."""
+    remaining = str(content)
+    first_chunk = True
+    while remaining:
+        if len(remaining) <= 2000:
+            chunk, remaining = remaining, ""
+        else:
+            split_at = remaining.rfind("\n", 0, 2000)
+            if split_at <= 0:
+                split_at = 2000
+            chunk, remaining = remaining[:split_at], remaining[split_at:].lstrip("\n")
+
+        if first_chunk:
+            await message.reply(chunk)
+            first_chunk = False
+        else:
+            await message.channel.send(chunk)
+
 class Bot(discord.Client):
 
     def __init__(self):
@@ -40,7 +60,7 @@ class Bot(discord.Client):
                 message.author.id,
                 message.channel.id,
             )
-            await message.reply(result)
+            await reply_in_chunks(message, result)
             return
 
         bot_id_str = str(self.user.id)
@@ -103,7 +123,7 @@ class Bot(discord.Client):
                     reset_request_context(context_token)
 
                 if result:
-                    await message.reply(result)
+                    await reply_in_chunks(message, result)
         except Exception as e:
             print(f"[Bot] LLM error: {e}")
             await message.reply("Something went wrong talking to the model.")
