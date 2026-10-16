@@ -132,6 +132,15 @@ async def confirm_pending_deletion(guild_id: int, user_id: int, channel_id: int)
     return "\n".join(results)
 
 
+def cancel_pending_deletion(guild_id: int, user_id: int, channel_id: int) -> str:
+    """Discard an unconfirmed deletion batch for the same user and channel."""
+    key = (guild_id, user_id, channel_id)
+    pending = pending_deletions.pop(key, None)
+    if pending is None:
+        return "There is no pending deletion to cancel."
+    return "Deletion cancelled. No messages or server items were deleted."
+
+
 async def get_deletion_preview(tool_name: str, arguments: dict) -> str:
     """Return a human-readable target preview without mutating Discord state."""
     bot = get_bot()
@@ -394,6 +403,64 @@ async def get_current_channel_history() -> list[dict] | str:
     return history if isinstance(history, list) else str(history_result)
 
 
+def get_delete_text_channel_name_request(user_text: str) -> str | None:
+    """Read a quoted text-channel name from an explicit delete request."""
+    command = get_user_command(user_text).strip()
+    patterns = (
+        # Accept the common misspelling "channal" too.
+        r"\b(?:delete|remove)\s+text\s+chann(?:el|al)\s+name\s*"
+        r"[\"“]([^\"”]+)[\"”]",
+        r"ลบ\s*(?:ช่อง\s*ข้อความ|text\s*channel)\s*(?:ชื่อ)?\s*"
+        r"[\"“]([^\"”]+)[\"”]",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, command, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+    return None
+
+
+async def queue_named_text_channel_deletion(channel_name: str) -> str:
+    """Resolve a text channel by exact Discord name, then queue it for deletion."""
+    context = request_context.get()
+    if context is None:
+        return "Error: Delete commands require a Discord request context."
+
+    guild_id, _user_id, _source_channel_id = context
+    channels_result = await execute_tool("list_channel_tool", {"guild_id": str(guild_id)})
+    try:
+        channels = json.loads(channels_result)
+    except json.JSONDecodeError:
+        return "Error: Unable to read the server channel list."
+    if not isinstance(channels, list):
+        return str(channels_result)
+
+    matches = [
+        channel for channel in channels
+        if channel.get("type") == "text" and channel.get("name") == channel_name
+    ]
+    if not matches:
+        return f"No text channel named '{channel_name}' was found. Nothing was deleted."
+    if len(matches) > 1:
+        ids = ", ".join(str(channel["id"]) for channel in matches)
+        return (
+            f"More than one text channel is named '{channel_name}' (IDs: {ids}). "
+            "Please delete by a specific channel ID."
+        )
+
+    result = await execute_tool("delete_text_channel_tool", {
+        "guild_id": str(guild_id),
+        "channel_id": str(matches[0]["id"]),
+    })
+    if not str(result).startswith("Confirmation required."):
+        return str(result)
+
+    deletion = pending_deletions[context][0][-1]
+    return format_deletion_confirmation(
+        "The following text channel will be deleted:", [deletion[2]],
+    )
+
+
 async def queue_single_message_deletion(message_id: str) -> str:
     """Verify a user-provided ID against current-channel history and queue it."""
     context = request_context.get()
@@ -514,6 +581,13 @@ async def queue_all_recent_message_deletions() -> str:
 
 
 async def run_agent(user_text: str) -> str | None:
+    text_channel_name = get_delete_text_channel_name_request(user_text)
+    if text_channel_name:
+        context = request_context.get()
+        if context is not None:
+            pending_deletions.pop(context, None)
+        return await queue_named_text_channel_deletion(text_channel_name)
+
     message_id = get_single_message_id_request(user_text)
     if message_id:
         context = request_context.get()

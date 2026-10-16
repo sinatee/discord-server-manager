@@ -1,5 +1,11 @@
 import discord
-from llm import confirm_pending_deletion, reset_request_context, run_agent, set_request_context
+from llm import (
+    cancel_pending_deletion,
+    confirm_pending_deletion,
+    reset_request_context,
+    run_agent,
+    set_request_context,
+)
 from client_state import set_bot
 # import os
 # from dotenv import load_dotenv
@@ -56,6 +62,15 @@ class Bot(discord.Client):
 
         if message.content.strip().lower() in {"confirm", "ยืนยัน"}:
             result = await confirm_pending_deletion(
+                message.guild.id,
+                message.author.id,
+                message.channel.id,
+            )
+            await reply_in_chunks(message, result)
+            return
+
+        if message.content.strip().lower() in {"reject", "cancel", "ยกเลิก"}:
+            result = cancel_pending_deletion(
                 message.guild.id,
                 message.author.id,
                 message.channel.id,
