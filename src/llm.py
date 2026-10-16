@@ -313,7 +313,158 @@ def is_delete_all_messages_request(user_text: str) -> bool:
     ))
 
 
+def get_user_command(user_text: str) -> str:
+    """Extract the command from the context block supplied by bot.py."""
+    match = re.search(r"^User Message:\s*(.+)$", user_text, re.MULTILINE)
+    return match.group(1) if match else user_text
+
+
+def get_single_message_id_request(user_text: str) -> str | None:
+    """Find an explicit Discord message ID in a delete-one-message command."""
+    command = get_user_command(user_text)
+    patterns = (
+        r"\b(?:delete|remove)\s+(?:the\s+)?(?:message|msg)\s*"
+        r"(?:id\s*)?[:#]?\s*(\d{15,22})\b",
+        r"ลบ\s*ข้อความ\s*(?:id\s*)?[:#]?\s*(\d{15,22})\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, command, re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return None
+
+
+def is_delete_mentioned_user_messages_request(user_text: str) -> bool:
+    """Identify a request to delete messages authored by a mentioned user."""
+    command = get_user_command(user_text).lower()
+    return bool(re.search(
+        r"\b(?:delete|remove)\s+(?:all\s+)?messages?\s+(?:from|of)\b",
+        command,
+    )) or bool(re.search(r"ลบ\s*ข้อความ\s*(?:ทั้งหมด\s*)?ของ", command))
+
+
+def get_mentioned_user_ids(user_text: str) -> set[str]:
+    """Read the verified mention IDs inserted by bot.py into the context block."""
+    match = re.search(r"^Mentioned users:\s*(.+)$", user_text, re.MULTILINE)
+    if match is None or match.group(1).strip() == "None":
+        return set()
+    return set(re.findall(r"\(ID:\s*(\d+)\)", match.group(1)))
+
+
+async def get_current_channel_history() -> list[dict] | str:
+    """Fetch recent history using only the guild and channel in Discord context."""
+    context = request_context.get()
+    if context is None:
+        return "Error: Delete commands require a Discord request context."
+
+    guild_id, _user_id, channel_id = context
+    history_result = await execute_tool("get_message_history_tool", {
+        "guild_id": str(guild_id),
+        "channel_id": str(channel_id),
+        "limit": 50,
+    })
+    try:
+        history = json.loads(history_result)
+    except json.JSONDecodeError:
+        return "Error: Unable to read message history."
+    return history if isinstance(history, list) else str(history_result)
+
+
+async def queue_single_message_deletion(message_id: str) -> str:
+    """Verify a user-provided ID against current-channel history and queue it."""
+    context = request_context.get()
+    if context is None:
+        return "Error: Delete commands require a Discord request context."
+
+    _guild_id, _user_id, channel_id = context
+    history = await get_current_channel_history()
+    if isinstance(history, str):
+        return history
+
+    valid_ids = {
+        str(message["message_id"])
+        for message in history if message.get("message_id")
+    }
+    if message_id not in valid_ids:
+        return (
+            "That message ID was not found among the latest 50 messages in this channel. "
+            "Use an ID returned by this channel's message history."
+        )
+
+    result = await execute_tool("delete_message_tool", {
+        "channel_id": str(channel_id),
+        "message_id": message_id,
+    })
+    if not str(result).startswith("Confirmation required."):
+        return str(result)
+
+    deletion = pending_deletions[context][0][-1]
+    return (
+        f"The following message will be deleted:\n{deletion[2]}\n"
+        "Reply `confirm` or `ยืนยัน` within 5 minutes to continue."
+    )
+
+
+async def queue_mentioned_user_message_deletions(user_ids: set[str]) -> str:
+    """Queue recent current-channel messages written by the mentioned user(s)."""
+    context = request_context.get()
+    if context is None:
+        return "Error: Delete commands require a Discord request context."
+    if not user_ids:
+        return "Please mention the user whose messages you want to delete."
+
+    _guild_id, _user_id, channel_id = context
+    history = await get_current_channel_history()
+    if isinstance(history, str):
+        return history
+
+    message_ids = [
+        str(message["message_id"])
+        for message in history
+        if message.get("message_id") and str(message.get("author_id")) in user_ids
+    ]
+    if not message_ids:
+        return "No recent messages from the mentioned user were found in this channel."
+
+    queued = 0
+    errors = []
+    for message_id in message_ids:
+        result = await execute_tool("delete_message_tool", {
+            "channel_id": str(channel_id),
+            "message_id": message_id,
+        })
+        if str(result).startswith("Confirmation required."):
+            queued += 1
+        else:
+            errors.append(str(result))
+
+    if not queued:
+        return "\n".join(errors) or "No messages could be queued for deletion."
+
+    previews = pending_deletions[context][0]
+    preview_text = "\n".join(deletion[2] for deletion in previews)
+    error_text = f"\n{' '.join(errors)}" if errors else ""
+    return (
+        f"The following {queued} message(s) from the mentioned user will be deleted:\n"
+        f"{preview_text}{error_text}\nReply `confirm` or `ยืนยัน` within 5 minutes to continue."
+    )
+
+
 async def run_agent(user_text: str) -> str | None:
+    message_id = get_single_message_id_request(user_text)
+    if message_id:
+        context = request_context.get()
+        if context is not None:
+            # A new request must not reuse a previous, unconfirmed batch.
+            pending_deletions.pop(context, None)
+        return await queue_single_message_deletion(message_id)
+
+    if is_delete_mentioned_user_messages_request(user_text):
+        context = request_context.get()
+        if context is not None:
+            pending_deletions.pop(context, None)
+        return await queue_mentioned_user_message_deletions(get_mentioned_user_ids(user_text))
+
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_text},
