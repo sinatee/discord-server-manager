@@ -1,4 +1,6 @@
 import inspect
+from contextvars import ContextVar
+from datetime import datetime, timedelta, timezone
 
 import ollama
 
@@ -63,8 +65,44 @@ TOOL_ARGUMENT_CONTRACTS = {
     "unassign_role_tool": {"guild_id", "user_id", "role_id"},
     "delete_role_tool": {"guild_id", "role_id"},
 }
+DELETE_TOOLS = {
+    "delete_message_tool",
+    "delete_category_tool",
+    "delete_text_channel_tool",
+    "delete_voice_channel_tool",
+    "delete_role_tool",
+}
+CONFIRMATION_TIMEOUT = timedelta(minutes=5)
+request_context = ContextVar("request_context", default=None)
+pending_deletions = {}
 
-async def execute_tool(tool_name: str, arguments: dict) -> str:
+
+def set_request_context(guild_id: int, user_id: int, channel_id: int):
+    """Store the Discord request identity for the current agent execution."""
+    return request_context.set((guild_id, user_id, channel_id))
+
+
+def reset_request_context(token) -> None:
+    request_context.reset(token)
+
+
+async def confirm_pending_deletion(guild_id: int, user_id: int, channel_id: int) -> str:
+    """Execute the pending deletion batch for the same user and channel."""
+    key = (guild_id, user_id, channel_id)
+    pending = pending_deletions.pop(key, None)
+    if pending is None:
+        return "There is no pending deletion to confirm."
+
+    deletions, expires_at = pending
+    if datetime.now(timezone.utc) > expires_at:
+        return "The deletion confirmation expired. Please make the request again."
+
+    results = []
+    for tool_name, arguments in deletions:
+        results.append(await execute_tool(tool_name, arguments, confirmed=True))
+    return "\n".join(results)
+
+async def execute_tool(tool_name: str, arguments: dict, *, confirmed: bool = False) -> str:
     """Dynamically execute a tool function by name with given arguments."""
 
     arguments = dict(arguments or {})
@@ -122,6 +160,22 @@ async def execute_tool(tool_name: str, arguments: dict) -> str:
             f"{', '.join(missing_arguments)}."
         )
 
+    if tool_name in DELETE_TOOLS and not confirmed:
+        context = request_context.get()
+        if context is None:
+            return "Error: Delete commands require a Discord request context."
+
+        pending = pending_deletions.get(context)
+        if pending is None or datetime.now(timezone.utc) > pending[1]:
+            pending = ([], datetime.now(timezone.utc) + CONFIRMATION_TIMEOUT)
+            pending_deletions[context] = pending
+
+        deletions, _expires_at = pending
+        deletion = (tool_name, arguments)
+        if deletion not in deletions:
+            deletions.append(deletion)
+        return "Confirmation required."
+
     try:
         return await tool_func(**arguments)
     except Exception as e:
@@ -142,11 +196,11 @@ CONTEXT
 - Never invent, guess, or use placeholder IDs.
 
 RESPONSE RULE
-- Every user request must end with send_message_tool.
-- For an action request: call the required action tool first, then call
-  send_message_tool with the real result returned by that tool.
-- For a question or an ambiguous request: call send_message_tool with a helpful answer
-  or a clarification question.
+- The application sends your final text reply automatically. Do not call send_message_tool
+  merely to reply to the current user.
+- Call send_message_tool only when the user explicitly asks to send a message to a channel.
+- For an action request, call the required action tools. The application reports their real results.
+- For a question or an ambiguous request, reply with a helpful answer or clarification question.
 - Never claim an action succeeded unless the action tool returned success.
 
 TOOL SELECTION
@@ -201,6 +255,14 @@ CHANNEL DELETION
   4. If no match exists, report that it was not found.
   5. If multiple matches exist, ask the user to provide the channel ID.
 - Do not delete a text channel when the user requested a voice channel, or vice versa.
+- Deletion requests are collected into one confirmation batch. Tell the user to confirm only
+  after every requested deletion tool has been selected.
+
+MULTIPLE COMMANDS
+- When the user gives multiple independent commands in one message, call every matching action
+  tool in the same response, in the order requested.
+- For multiple deletion commands, call every matching delete tool in the same response. They are
+  confirmed and executed together as one batch.
 
 LIST RESULTS
 - For channel, category, member, or role lists, show only a clean bullet list of names.
@@ -218,38 +280,47 @@ EXAMPLES
 User: "สร้างห้อง text ชื่อ general"
 Flow:
 1. create_text_channel_tool(guild_id, "general")
-2. send_message_tool(channel_id, tool result)
 
 User: "สร้างห้องเสียงชื่อ meeting ใน category งาน"
 Flow:
 1. list_category_tool(guild_id)
 2. Find category name "งาน"
 3. create_voice_channel_tool(guild_id, "meeting", category_id)
-4. send_message_tool(channel_id, tool result)
 
 User: "ลบห้อง test"
 Flow:
 1. list_channel_tool(guild_id)
 2. Find the matching channel.
 3. If exactly one match exists, delete it with the correct text or voice tool.
-4. send_message_tool(channel_id, tool result)
 
 User: "แสดงรายการห้อง"
 Flow:
 1. list_channel_tool(guild_id)
-2. send_message_tool(channel_id, formatted list)
 """
 
 LOOP_LIMIT = 10
-CHANNEL_DELETE_TOOLS = {"delete_text_channel_tool", "delete_voice_channel_tool"}
+MUTATING_TOOLS = {
+    "send_message_tool",
+    "delete_message_tool",
+    "create_category_tool",
+    "delete_category_tool",
+    "move_category_tool",
+    "create_text_channel_tool",
+    "delete_text_channel_tool",
+    "create_voice_channel_tool",
+    "delete_voice_channel_tool",
+    "create_role_tool",
+    "assign_role_tool",
+    "unassign_role_tool",
+    "delete_role_tool",
+}
 client = ollama.AsyncClient()
 
-async def run_agent(user_text: str) -> None:
+async def run_agent(user_text: str) -> str | None:
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_text},
     ]
-    sent = False
     nudged = False
 
     for _ in range(LOOP_LIMIT):
@@ -270,42 +341,52 @@ async def run_agent(user_text: str) -> None:
         messages.append(res.message)
 
         if not res.message.tool_calls:
-            if sent:
-                print(f"[agent done] {res.message.content}")
-                return
-            
+            if res.message.content:
+                return res.message.content
+
             if not nudged:
                 nudged = True
                 messages.append({
                     "role": "user",
-                    "content": "REMINDER: You must call `send_message_tool` to reply. The user cannot see plain text. Call `send_message_tool` now.",
+                    "content": "Reply with a clear answer or call the required tool.",
                 })
                 continue
 
             raise RuntimeError("model never sent a message")
 
+        action_results = []
+        confirmation_requested = False
         for call in res.message.tool_calls:
             name = call.function.name
             args = call.function.arguments or {}
             
             result = await execute_tool(name, args)
 
-            if (
-                name in CHANNEL_DELETE_TOOLS
-                and not str(result).startswith("Error")
-            ):
-                print(f"[agent done] {name} completed.")
-                return
-            
-            if name == "send_message_tool" and not str(result).startswith("Error"):
-                sent = True
-                print("[agent done] Reply sent.")
-                return
+            if str(result).startswith("Confirmation required."):
+                confirmation_requested = True
+                continue
+
+            if name in MUTATING_TOOLS:
+                action_results.append(str(result))
+                continue
 
             # Standard tool role structure for Ollama API
             messages.append({
                 "role": "tool",
                 "content": str(result),
             })
+
+        if confirmation_requested:
+            context = request_context.get()
+            deletion_count = len(pending_deletions[context][0]) if context else 0
+            summary = "\n".join(action_results)
+            confirmation = (
+                f"Confirmation required for {deletion_count} deletion(s). "
+                "Reply `confirm` or `ยืนยัน` within 5 minutes to continue."
+            )
+            return f"{summary}\n{confirmation}".strip()
+
+        if action_results:
+            return "\n".join(action_results)
 
     raise RuntimeError("Agent reached maximum execution step limit without finishing.")

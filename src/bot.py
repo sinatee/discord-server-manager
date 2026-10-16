@@ -1,5 +1,5 @@
 import discord
-from llm import run_agent
+from llm import confirm_pending_deletion, reset_request_context, run_agent, set_request_context
 from client_state import set_bot
 # import os
 # from dotenv import load_dotenv
@@ -32,6 +32,15 @@ class Bot(discord.Client):
         
         # Ignore DMs
         if not message.guild:
+            return
+
+        if message.content.strip().lower() in {"confirm", "ยืนยัน"}:
+            result = await confirm_pending_deletion(
+                message.guild.id,
+                message.author.id,
+                message.channel.id,
+            )
+            await message.reply(result)
             return
 
         bot_id_str = str(self.user.id)
@@ -76,7 +85,18 @@ class Bot(discord.Client):
 
         try:
             async with message.channel.typing():
-                await run_agent(context_data)
+                context_token = set_request_context(
+                    message.guild.id,
+                    message.author.id,
+                    message.channel.id,
+                )
+                try:
+                    result = await run_agent(context_data)
+                finally:
+                    reset_request_context(context_token)
+
+                if result:
+                    await message.reply(result)
         except Exception as e:
             print(f"[Bot] LLM error: {e}")
             await message.reply("Something went wrong talking to the model.")
