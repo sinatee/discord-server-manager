@@ -109,11 +109,32 @@ async def confirm_pending_deletion(guild_id: int, user_id: int, channel_id: int)
     return "\n".join(results)
 
 
-def get_deletion_preview(tool_name: str, arguments: dict) -> str:
+async def get_deletion_preview(tool_name: str, arguments: dict) -> str:
     """Return a human-readable target preview without mutating Discord state."""
     bot = get_bot()
     if bot is None:
         return "Error: Bot not initialized."
+
+    if tool_name == "delete_message_tool":
+        channel = bot.get_channel(int(arguments["channel_id"]))
+        if not isinstance(channel, discord.TextChannel):
+            return "Error: Text channel not found."
+
+        try:
+            message = await channel.fetch_message(int(arguments["message_id"]))
+        except discord.NotFound:
+            return "Error: Message not found in this channel."
+        except discord.Forbidden:
+            return "Error: Bot lacks permission to read this message."
+        except discord.HTTPException as error:
+            return f"Error: Unable to read message: {error}"
+
+        content = message.content.replace("\n", " ").strip()
+        preview = content[:80] + ("..." if len(content) > 80 else "")
+        return (
+            f"- Message from {message.author.display_name} in #{channel.name}: "
+            f"{preview or '[no text]'} (ID: {message.id})"
+        )
 
     guild = bot.get_guild(int(arguments["guild_id"]))
     if guild is None:
@@ -138,12 +159,6 @@ def get_deletion_preview(tool_name: str, arguments: dict) -> str:
         if role is None:
             return "Error: Role not found in this server."
         return f"- Role: {role.name} (ID: {role.id})"
-
-    if tool_name == "delete_message_tool":
-        channel = guild.get_channel(int(arguments["channel_id"]))
-        if not isinstance(channel, discord.TextChannel):
-            return "Error: Text channel not found in this server."
-        return f"- Message ID: {arguments['message_id']} in #{channel.name}"
 
     return "Error: Unsupported delete tool."
 
@@ -211,7 +226,7 @@ async def execute_tool(tool_name: str, arguments: dict, *, confirmed: bool = Fal
             return "Error: Delete commands require a Discord request context."
 
         guild_id, user_id, source_channel_id = context
-        preview = get_deletion_preview(tool_name, arguments)
+        preview = await get_deletion_preview(tool_name, arguments)
         if preview.startswith("Error:"):
             return preview
 
