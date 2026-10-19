@@ -373,6 +373,18 @@ def get_requested_history_limit(user_text: str, default: int = 50) -> int:
     return max(1, min(int(match.group(1)), 50))
 
 
+def get_post_target_channel_name(user_text: str) -> str | None:
+    """Read the channel name from 'post ... inside the <name> channel'."""
+    command = get_user_command(user_text)
+    match = re.search(
+        r"\b(?:post|send)\s+[\"“].+?[\"”]\s+(?:inside|in)\s+"
+        r"(?:the\s+)?([\w-]+)\s+channel\b",
+        command,
+        re.IGNORECASE,
+    )
+    return match.group(1) if match else None
+
+
 def get_user_command(user_text: str) -> str:
     """Extract the command from the context block supplied by bot.py."""
     match = re.search(r"^User Message:\s*(.+)$", user_text, re.MULTILINE)
@@ -693,6 +705,8 @@ async def run_agent(user_text: str) -> str | None:
     completed_action_results = []
     created_resources = {}
     created_category_ids = []
+    created_text_channel_ids = {}
+    post_target_channel_name = get_post_target_channel_name(user_text)
     command_depends_on_new_category = bool(re.search(
         r"\binside\s+it\b|ภายใน(?:หมวดหมู่)?นี้",
         get_user_command(user_text),
@@ -749,6 +763,20 @@ async def run_agent(user_text: str) -> str | None:
                     f"{args.get('category_id')} with newly-created category_id {correct_category_id}"
                 )
                 args["category_id"] = correct_category_id
+
+            if (
+                name == "send_message_tool"
+                and post_target_channel_name is not None
+                and post_target_channel_name.casefold() in created_text_channel_ids
+                and str(args.get("channel_id"))
+                != created_text_channel_ids[post_target_channel_name.casefold()]
+            ):
+                correct_channel_id = created_text_channel_ids[post_target_channel_name.casefold()]
+                print(
+                    "[tool correction] Replacing model-provided channel_id "
+                    f"{args.get('channel_id')} with newly-created text channel_id {correct_channel_id}"
+                )
+                args["channel_id"] = correct_channel_id
             duplicate_creation = False
             resource_key = None
             if name in CREATION_TOOLS and args.get("guild_id") and args.get("name"):
@@ -774,6 +802,12 @@ async def run_agent(user_text: str) -> str | None:
                 category_id_match = re.search(r"\(ID:\s*(\d+)\)", str(result))
                 if category_id_match:
                     created_category_ids.append(category_id_match.group(1))
+
+            if name == "create_text_channel_tool" and not str(result).startswith("Error:"):
+                channel_id_match = re.search(r"\(ID:\s*(\d+)\)", str(result))
+                channel_name = str(args.get("name", "")).casefold()
+                if channel_id_match and channel_name:
+                    created_text_channel_ids[channel_name] = channel_id_match.group(1)
 
             if str(result).startswith("Confirmation required."):
                 confirmation_requested = True
