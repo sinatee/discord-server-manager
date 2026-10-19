@@ -301,6 +301,8 @@ BEHAVIOR
 - For a category name, list categories, require exactly one match, then use its ID. Otherwise ask.
 - For a channel name, list channels and require an exact name and requested type match. Otherwise ask.
 - For actions, call tools; never claim success without a successful tool result.
+- For dependent multi-step work, continue calling tools until every requested step is complete.
+  Use IDs returned by a prior tool (for example a newly-created category ID), never invent them.
 - For lists, return clean bullet names, not raw JSON. Show IDs only when requested or needed.
 - If information is missing or a tool errors, ask one clear question or report the error.
 
@@ -328,6 +330,12 @@ MUTATING_TOOLS = {
     "unassign_role_tool",
     "delete_role_tool",
 }
+CREATION_TOOLS = {
+    "create_category_tool",
+    "create_text_channel_tool",
+    "create_voice_channel_tool",
+    "create_role_tool",
+}
 client = ollama.AsyncClient()
 
 
@@ -344,6 +352,25 @@ def is_delete_all_messages_request(user_text: str) -> bool:
         normalized_text,
     )) or "ลบทุกข้อความ" in normalized_text
     return english_request or thai_request
+
+
+def is_delete_bot_messages_request(user_text: str) -> bool:
+    """Identify a request to delete only bot-authored messages."""
+    command = get_user_command(user_text).lower()
+    return bool(re.search(
+        r"\b(?:delete|remove)\s+(?:all\s+)?messages?\s+"
+        r"(?:sent\s+)?by\s+(?:the\s+)?bots?\b",
+        command,
+    )) or "ลบข้อความของบอท" in command
+
+
+def get_requested_history_limit(user_text: str, default: int = 50) -> int:
+    """Use an explicit 'last N messages' limit while keeping Discord reads bounded."""
+    command = get_user_command(user_text).lower()
+    match = re.search(r"\b(?:last|latest)\s+(\d+)\s+messages?\b", command)
+    if match is None:
+        return default
+    return max(1, min(int(match.group(1)), 50))
 
 
 def get_user_command(user_text: str) -> str:
@@ -384,7 +411,7 @@ def get_mentioned_user_ids(user_text: str) -> set[str]:
     return set(re.findall(r"\(ID:\s*(\d+)\)", match.group(1)))
 
 
-async def get_current_channel_history() -> list[dict] | str:
+async def get_current_channel_history(limit: int = 50) -> list[dict] | str:
     """Fetch recent history using only the guild and channel in Discord context."""
     context = request_context.get()
     if context is None:
@@ -394,7 +421,7 @@ async def get_current_channel_history() -> list[dict] | str:
     history_result = await execute_tool("get_message_history_tool", {
         "guild_id": str(guild_id),
         "channel_id": str(channel_id),
-        "limit": 50,
+        "limit": limit,
     })
     try:
         history = json.loads(history_result)
@@ -410,6 +437,8 @@ def get_delete_text_channel_name_request(user_text: str) -> str | None:
         # Accept the common misspelling "channal" too.
         r"\b(?:delete|remove)\s+text\s+chann(?:el|al)\s+name\s*"
         r"[\"“]([^\"”]+)[\"”]",
+        r"\b(?:delete|remove)\s+(?:the\s+)?(?:text\s+)?chann(?:el|al)\s+"
+        r"(?:named|name)\s*[\"“]([^\"”]+)[\"”]",
         r"ลบ\s*(?:ช่อง\s*ข้อความ|text\s*channel)\s*(?:ชื่อ)?\s*"
         r"[\"“]([^\"”]+)[\"”]",
     )
@@ -580,6 +609,48 @@ async def queue_all_recent_message_deletions() -> str:
     return f"{confirmation}\n{' '.join(errors)}" if errors else confirmation
 
 
+async def queue_bot_message_deletions(limit: int) -> str:
+    """Queue only bot-authored messages from the requested current-channel history."""
+    context = request_context.get()
+    if context is None:
+        return "Error: Delete commands require a Discord request context."
+
+    _guild_id, _user_id, channel_id = context
+    history = await get_current_channel_history(limit)
+    if isinstance(history, str):
+        return history
+
+    message_ids = [
+        str(message["message_id"])
+        for message in history
+        if message.get("message_id") and message.get("is_bot") is True
+    ]
+    if not message_ids:
+        return "No bot messages were found in the requested message history."
+
+    queued = 0
+    errors = []
+    for message_id in message_ids:
+        result = await execute_tool("delete_message_tool", {
+            "channel_id": str(channel_id),
+            "message_id": message_id,
+        })
+        if str(result).startswith("Confirmation required."):
+            queued += 1
+        else:
+            errors.append(str(result))
+
+    if not queued:
+        return "\n".join(errors) or "No bot messages could be queued for deletion."
+
+    previews = pending_deletions[context][0]
+    confirmation = format_deletion_confirmation(
+        f"The following {queued} bot message(s) will be deleted:",
+        [deletion[2] for deletion in previews],
+    )
+    return f"{confirmation}\n{' '.join(errors)}" if errors else confirmation
+
+
 async def run_agent(user_text: str) -> str | None:
     text_channel_name = get_delete_text_channel_name_request(user_text)
     if text_channel_name:
@@ -602,6 +673,12 @@ async def run_agent(user_text: str) -> str | None:
             pending_deletions.pop(context, None)
         return await queue_mentioned_user_message_deletions(get_mentioned_user_ids(user_text))
 
+    if is_delete_bot_messages_request(user_text):
+        context = request_context.get()
+        if context is not None:
+            pending_deletions.pop(context, None)
+        return await queue_bot_message_deletions(get_requested_history_limit(user_text))
+
     if is_delete_all_messages_request(user_text):
         context = request_context.get()
         if context is not None:
@@ -613,6 +690,14 @@ async def run_agent(user_text: str) -> str | None:
         {"role": "user", "content": user_text},
     ]
     nudged = False
+    completed_action_results = []
+    created_resources = {}
+    created_category_ids = []
+    command_depends_on_new_category = bool(re.search(
+        r"\binside\s+it\b|ภายใน(?:หมวดหมู่)?นี้",
+        get_user_command(user_text),
+        re.IGNORECASE,
+    ))
     for _ in range(LOOP_LIMIT):
         res = await client.chat(
             model="qwen3:1.7b",
@@ -631,6 +716,9 @@ async def run_agent(user_text: str) -> str | None:
         messages.append(res.message)
 
         if not res.message.tool_calls:
+            if completed_action_results:
+                # Report the actual tool results, not a model-written summary.
+                return "\n".join(completed_action_results)
             if res.message.content:
                 return res.message.content
 
@@ -644,23 +732,58 @@ async def run_agent(user_text: str) -> str | None:
 
             raise RuntimeError("model never sent a message")
 
-        action_results = []
         confirmation_requested = False
         for call in res.message.tool_calls:
             name = call.function.name
-            args = call.function.arguments or {}
-            
-            result = await execute_tool(name, args)
+            args = dict(call.function.arguments or {})
+
+            if (
+                command_depends_on_new_category
+                and name in {"create_text_channel_tool", "create_voice_channel_tool"}
+                and created_category_ids
+                and str(args.get("category_id")) not in created_category_ids
+            ):
+                correct_category_id = created_category_ids[-1]
+                print(
+                    "[tool correction] Replacing model-provided category_id "
+                    f"{args.get('category_id')} with newly-created category_id {correct_category_id}"
+                )
+                args["category_id"] = correct_category_id
+            duplicate_creation = False
+            resource_key = None
+            if name in CREATION_TOOLS and args.get("guild_id") and args.get("name"):
+                # Names, not model-provided container IDs, define duplicate
+                # creation within one user request.  This blocks a model retry
+                # from creating e.g. a second "reports" channel elsewhere.
+                resource_key = (name, str(args["guild_id"]), str(args["name"]).casefold())
+                if resource_key in created_resources:
+                    duplicate_creation = True
+                    result = (
+                        "Duplicate creation ignored. The resource was already created in this request: "
+                        f"{created_resources[resource_key]}"
+                    )
+                else:
+                    result = await execute_tool(name, args)
+            else:
+                result = await execute_tool(name, args)
+
+            if resource_key is not None and not duplicate_creation and not str(result).startswith("Error:"):
+                created_resources[resource_key] = str(result)
+
+            if name == "create_category_tool" and not str(result).startswith("Error:"):
+                category_id_match = re.search(r"\(ID:\s*(\d+)\)", str(result))
+                if category_id_match:
+                    created_category_ids.append(category_id_match.group(1))
 
             if str(result).startswith("Confirmation required."):
                 confirmation_requested = True
                 continue
 
-            if name in MUTATING_TOOLS:
-                action_results.append(str(result))
-                continue
+            if name in MUTATING_TOOLS and not duplicate_creation:
+                completed_action_results.append(str(result))
 
-            # Standard tool role structure for Ollama API
+            # Give the model every result.  Dependent commands need the actual
+            # ID returned by the preceding tool to continue safely.
             messages.append({
                 "role": "tool",
                 "content": str(result),
@@ -670,14 +793,11 @@ async def run_agent(user_text: str) -> str | None:
             context = request_context.get()
             pending_key = context if context else None
             deletions = pending_deletions[pending_key][0] if pending_key else []
-            summary = "\n".join(action_results)
+            summary = "\n".join(completed_action_results)
             confirmation = format_deletion_confirmation(
                 "The following will be deleted:",
                 [deletion[2] for deletion in deletions],
             )
             return f"{summary}\n{confirmation}".strip()
-
-        if action_results:
-            return "\n".join(action_results)
 
     raise RuntimeError("Agent reached maximum execution step limit without finishing.")
